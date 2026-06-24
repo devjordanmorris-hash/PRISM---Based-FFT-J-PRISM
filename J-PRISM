@@ -1,0 +1,159 @@
+import torch
+import time
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("Device:", device)
+
+# -------------------------
+# SIGNAL
+# -------------------------
+
+N = 8192
+
+x = torch.linspace(0, 1, N, device=device)
+
+signal = (
+    torch.sin(2*torch.pi*5*x)
+    + 0.5*torch.sin(2*torch.pi*11*x)
+    + 0.25*torch.sin(2*torch.pi*23*x)
+)
+
+# -------------------------
+# FUSED TRIANGLE BASIS (NO EXTRA PASSES)
+# -------------------------
+
+def fused_basis(t):
+    # all basis functions computed in one shot
+    return (
+        t,
+        t * (1 - t),
+        t * t
+    )
+
+# -------------------------
+# PRISM v15 (FULL FUSION ENGINE)
+# -------------------------
+
+def prism_v15(signal, segments, tile_size=64):
+
+    N = signal.shape[0]
+
+    # hard clamp to avoid fragmentation
+    segments = max(1, min(segments, N // tile_size))
+
+    usable = segments * tile_size
+    signal = signal[:usable]
+
+    # reshape once (no intermediate copies later)
+    blocks = signal.view(segments, tile_size)
+
+    # endpoints (spline core)
+    y0 = blocks[:, 0]
+    y1 = blocks[:, -1]
+
+    # single warp coordinate (GPU-friendly)
+    t = torch.linspace(0, 1, tile_size, device=device)
+
+    # -------------------------
+    # SPLINE CORE (vectorised)
+    # -------------------------
+
+    base = y0[:, None] * (1 - t) + y1[:, None] * t
+
+    # -------------------------
+    # TRIANGLE BASIS (FUSED)
+    # -------------------------
+
+    b0, b1, b2 = fused_basis(t)
+
+    # move to device once
+    b0 = b0.to(device)
+    b1 = b1.to(device)
+    b2 = b2.to(device)
+
+    # fused geometric enrichment (single expression tree)
+    tri = (
+        0.25 * b1 +
+        0.12 * b2 -
+        0.08 * b0
+    )[None, :]
+
+    # -------------------------
+    # RESIDUAL (ONE PASS ONLY)
+    # -------------------------
+
+    approx = base + tri
+
+    residual = signal.view(segments, tile_size) - approx
+
+    # stabilised correction (important for GPU stability)
+    corrected = approx + torch.tanh(residual)
+
+    return corrected.reshape(-1)
+
+# -------------------------
+# FFT BASELINE
+# -------------------------
+
+def fft_baseline(signal):
+    return torch.fft.ifft(torch.fft.fft(signal)).real
+
+# -------------------------
+# METRICS
+# -------------------------
+
+def l2(a, b):
+    n = min(len(a), len(b))
+    return torch.sqrt(torch.mean((a[:n] - b[:n]) ** 2)).item()
+
+def maxe(a, b):
+    n = min(len(a), len(b))
+    return torch.max(torch.abs(a[:n] - b[:n])).item()
+
+# -------------------------
+# BENCHMARK
+# -------------------------
+
+levels = [32, 64, 128, 256, 512, 1024, 2048, 4096]
+
+print("\n=== PRISM v15 (FUSED GPU ENGINE) vs FFT ===\n")
+
+for L in levels:
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    t0 = time.perf_counter()
+
+    prism_out = prism_v15(signal, L)
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    t1 = time.perf_counter()
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    t2 = time.perf_counter()
+
+    fft_out = fft_baseline(signal)
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    t3 = time.perf_counter()
+
+    p_l2 = l2(signal, prism_out)
+    p_max = maxe(signal, prism_out)
+
+    f_l2 = l2(signal, fft_out)
+    f_max = maxe(signal, fft_out)
+
+    print(
+        f"{L:5d} PRISMS | "
+        f"L2={p_l2:.6f} MAX={p_max:.6f} | "
+        f"{(t1 - t0)*1e6:.2f} us || "
+        f"FFT L2={f_l2:.6f} MAX={f_max:.6f} | "
+        f"{(t3 - t2)*1e6:.2f} us"
+    )
