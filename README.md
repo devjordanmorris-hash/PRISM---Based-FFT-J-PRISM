@@ -37,11 +37,9 @@ The kernel runs on a GPU and extracts:
 - **Sovereign nations** seeking independent radar capability
 - **Researchers** working on drone detection and de‑escalation
 - **Engineers** building open, non‑extractive defence systems
-- **Quiet stewards** who build without seeking fame
 
-## The Intent
 
-> *“De‑escalation of drones—and children coming home to sovereign countries.”*
+
 
 This is MIT‑licensed so any sovereign nation can use it freely—without extraction, without gatekeeping, without control.
 
